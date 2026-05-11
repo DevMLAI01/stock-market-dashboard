@@ -15,9 +15,18 @@ The DataFrame columns available are:
 - year_low (float): 52-week low price
 - pct_change (float): Today's % price change
 - pct_from_high (float): % below 52-week high (0 = AT high, 5 = 5% below high)
+- market_cap_cr (float): Market capitalisation in Indian Crores (₹). Examples: Reliance ~1,800,000 Cr, small-cap ~5,000 Cr. Use this for any query about market cap, company size, large-cap/mid-cap/small-cap. Large-cap > 20,000 Cr, Mid-cap 5,000–20,000 Cr, Small-cap < 5,000 Cr.
 
-For fundamental metrics from Screener.in (available only after clicking a stock, NOT in the main list):
-- market_cap, pe_ratio, roe, roce, book_value, debt_equity, sales_growth
+For fundamental metrics NOT yet in the main list (require per-stock Screener.in lookup):
+- pe_ratio, roe, roce, book_value, debt_equity, sales_growth
+
+Indian number system reminders — always convert before filtering:
+- "1 lakh" = 100, "1 crore" = 1 (market_cap_cr is already in crores)
+- "10,000 crores" → value: 10000
+- "1 lakh crore" → value: 100000
+- "large cap" → market_cap_cr > 20000
+- "mid cap" → market_cap_cr between 5000 and 20000
+- "small cap" → market_cap_cr < 5000
 
 Return a JSON object with this exact structure:
 {
@@ -34,9 +43,7 @@ Return a JSON object with this exact structure:
   "summary": "one sentence describing what this filter does"
 }
 
-Only use columns available in the DataFrame listed above. If the query mentions fundamentals not in the list (like P/E ratio), include them in a "note" field explaining they require per-stock lookup.
-
-Return ONLY valid JSON, no markdown, no explanation."""
+Only use columns listed above. Return ONLY valid JSON, no markdown, no explanation."""
 
 
 def parse_nl_filter(query: str) -> dict:

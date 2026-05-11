@@ -1,5 +1,6 @@
 import pandas as pd
 import yfinance as yf
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from src.database import get_cached_nse, set_cached_nse
 
 # NSE display symbol → yfinance ticker (without .NS suffix)
@@ -157,8 +158,20 @@ NSE_UNIVERSE: dict[str, str] = {
 }
 
 
+def _fetch_market_cap(args: tuple) -> tuple[str, float | None]:
+    """Fetch market cap (in crores) for one symbol via fast_info. Runs in a thread pool."""
+    display_sym, yf_sym = args
+    try:
+        mc = yf.Ticker(f"{yf_sym}.NS").fast_info.market_cap
+        if mc and mc > 0:
+            return display_sym, round(mc / 1e7, 2)  # INR → crores (1 cr = 10^7)
+    except Exception:
+        pass
+    return display_sym, None
+
+
 def get_nifty_universe() -> pd.DataFrame:
-    """Fetch prices and 52-week high/low for the full NSE universe via yfinance bulk download."""
+    """Fetch prices, 52-week data, and market cap for the full NSE universe."""
     cached = get_cached_nse()
     if cached:
         return pd.DataFrame(cached)
@@ -218,9 +231,24 @@ def get_nifty_universe() -> pd.DataFrame:
             print(f"[yfinance] Skipping {yf_sym}: {e}")
             continue
 
-    if rows:
-        set_cached_nse(rows)
+    if not rows:
+        return pd.DataFrame()
 
+    # Fetch market cap in parallel for all symbols that returned OHLCV data
+    print(f"[yfinance] Fetching market cap for {len(rows)} symbols...")
+    built_syms = {r["symbol"] for r in rows}
+    pairs = [(k, v) for k, v in NSE_UNIVERSE.items() if k in built_syms]
+    mc_map: dict[str, float | None] = {}
+    with ThreadPoolExecutor(max_workers=30) as executor:
+        futures = {executor.submit(_fetch_market_cap, p): p for p in pairs}
+        for future in as_completed(futures):
+            sym, mc = future.result()
+            mc_map[sym] = mc
+
+    for row in rows:
+        row["market_cap_cr"] = mc_map.get(row["symbol"])
+
+    set_cached_nse(rows)
     return pd.DataFrame(rows)
 
 
