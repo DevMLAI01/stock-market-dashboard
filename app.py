@@ -19,6 +19,7 @@ from src.database import (
     create_watchlist, get_watchlists, add_to_watchlist,
     remove_from_watchlist, get_watchlist_stocks,
     delete_watchlist, save_filter_as_watchlist,
+    get_all_fundamentals, get_fundamentals_count,
 )
 from src.nse_client import get_stocks_near_52wk_high, get_nifty_universe, get_historical_ohlc
 from src.screener_client import get_stock_data
@@ -117,6 +118,27 @@ if "chart_interval" not in st.session_state:
     st.session_state.chart_interval = "1d"
 if "active_watchlist_id" not in st.session_state:
     st.session_state.active_watchlist_id = None
+if "fundamentals_refresh_started" not in st.session_state:
+    st.session_state.fundamentals_refresh_started = False
+
+
+# ── Fundamentals background refresh ──────────────────────────────────────────
+def _start_fundamentals_refresh() -> None:
+    """On first load: extract from screener_cache (instant), then fetch displayed stocks."""
+    from src.fundamentals_cache import sync_from_screener_cache, start_background_refresh
+    sync_from_screener_cache()
+    try:
+        from src.nse_client import get_stocks_near_52wk_high
+        near_high = get_stocks_near_52wk_high(threshold_pct=5.0)
+        if not near_high.empty:
+            start_background_refresh(near_high["symbol"].tolist(), delay=0.4)
+    except Exception:
+        pass
+
+
+if not st.session_state.fundamentals_refresh_started:
+    st.session_state.fundamentals_refresh_started = True
+    _start_fundamentals_refresh()
 
 
 # ── Data loading ──────────────────────────────────────────────────────────────
@@ -132,7 +154,27 @@ def load_ohlc(symbol: str, period: str, interval: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def load_screener(symbol: str) -> dict:
-    return get_stock_data(symbol)
+    data = get_stock_data(symbol)
+    # Also cache fundamentals whenever screener data is freshly loaded
+    if data:
+        try:
+            from src.fundamentals_cache import extract_metrics
+            from src.database import upsert_fundamentals
+            upsert_fundamentals(symbol, extract_metrics(data))
+        except Exception:
+            pass
+    return data
+
+
+def get_enriched_universe() -> pd.DataFrame:
+    """Universe df merged with cached fundamentals (LEFT JOIN — NaN for uncached stocks)."""
+    universe = load_universe()
+    fundamentals = get_all_fundamentals()
+    if fundamentals.empty:
+        return universe
+    fund_cols = [c for c in fundamentals.columns if c not in ("symbol", "fetched_at", "latest_quarter")]
+    merged = universe.merge(fundamentals[["symbol"] + fund_cols], on="symbol", how="left")
+    return merged
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -353,16 +395,23 @@ with tab_screener:
                 st.error("Set ANTHROPIC_API_KEY in your .env file to use AI filtering.")
             else:
                 with st.spinner("Loading stock universe..."):
-                    universe = load_universe()
+                    enriched = get_enriched_universe()
                 with st.spinner("Applying AI filter..."):
                     try:
-                        filtered_df, spec = run_nl_filter(nl_query.strip(), universe)
+                        filtered_df, spec = run_nl_filter(nl_query.strip(), enriched)
                         st.session_state.stock_df = filtered_df
                         st.session_state.filter_active = True
                         st.session_state.filter_summary = spec.get("summary", nl_query)
                         st.rerun()
                     except Exception as e:
                         st.error(f"Filter error: {e}")
+
+        # Fundamentals coverage
+        n_fund = get_fundamentals_count()
+        if n_fund > 0:
+            st.caption(f"🧠 Fundamentals cached: {n_fund} / 426 stocks — fundamental filters active")
+        else:
+            st.caption("🧠 Fundamentals loading in background…")
 
         # Save filtered result as watchlist
         if st.session_state.filter_active and not st.session_state.stock_df.empty:

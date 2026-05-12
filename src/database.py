@@ -51,6 +51,21 @@ def init_db() -> None:
                 FOREIGN KEY (watchlist_id) REFERENCES watchlist(id) ON DELETE CASCADE,
                 UNIQUE(watchlist_id, symbol)
             );
+
+            CREATE TABLE IF NOT EXISTS fundamentals (
+                symbol TEXT PRIMARY KEY,
+                pe_ratio REAL,
+                roce REAL,
+                roe REAL,
+                book_value REAL,
+                debt_equity REAL,
+                dividend_yield REAL,
+                profit_growth_yoy REAL,
+                revenue_growth_yoy REAL,
+                sales_growth_5yr REAL,
+                latest_quarter TEXT,
+                fetched_at TEXT NOT NULL
+            );
         """)
 
 
@@ -173,3 +188,52 @@ def save_filter_as_watchlist(name: str, symbols: list[str]) -> int:
             [(wl_id, sym, datetime.now().isoformat()) for sym in symbols],
         )
     return wl_id
+
+
+# ── Fundamentals cache ────────────────────────────────────────────────────────
+
+def upsert_fundamentals(symbol: str, metrics: dict) -> None:
+    with get_conn() as conn:
+        conn.execute("""
+            INSERT OR REPLACE INTO fundamentals
+                (symbol, pe_ratio, roce, roe, book_value, debt_equity, dividend_yield,
+                 profit_growth_yoy, revenue_growth_yoy, sales_growth_5yr, latest_quarter, fetched_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            symbol,
+            metrics.get("pe_ratio"),
+            metrics.get("roce"),
+            metrics.get("roe"),
+            metrics.get("book_value"),
+            metrics.get("debt_equity"),
+            metrics.get("dividend_yield"),
+            metrics.get("profit_growth_yoy"),
+            metrics.get("revenue_growth_yoy"),
+            metrics.get("sales_growth_5yr"),
+            metrics.get("latest_quarter"),
+            datetime.now().isoformat(),
+        ))
+
+
+def get_all_fundamentals() -> "pd.DataFrame":
+    import pandas as pd
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM fundamentals"
+        ).fetchall()
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame([dict(r) for r in rows])
+
+
+def get_fundamentals_count() -> int:
+    with get_conn() as conn:
+        row = conn.execute("SELECT COUNT(*) AS n FROM fundamentals").fetchone()
+    return row["n"] if row else 0
+
+
+def get_all_screener_cache_symbols() -> list[str]:
+    """Return all symbols currently in screener_cache (for bulk extraction)."""
+    with get_conn() as conn:
+        rows = conn.execute("SELECT symbol, data_json FROM screener_cache").fetchall()
+    return [(r["symbol"], r["data_json"]) for r in rows]
