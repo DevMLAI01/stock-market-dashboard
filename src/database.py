@@ -36,6 +36,21 @@ def init_db() -> None:
                 data_json TEXT NOT NULL,
                 fetched_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS watchlist (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS watchlist_stocks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                watchlist_id INTEGER NOT NULL,
+                symbol TEXT NOT NULL,
+                added_at TEXT NOT NULL,
+                FOREIGN KEY (watchlist_id) REFERENCES watchlist(id) ON DELETE CASCADE,
+                UNIQUE(watchlist_id, symbol)
+            );
         """)
 
 
@@ -93,3 +108,68 @@ def set_cached_nse(data: dict) -> None:
             "INSERT OR REPLACE INTO nse_cache (id, data_json, fetched_at) VALUES (1, ?, ?)",
             (json.dumps(data), datetime.now().isoformat()),
         )
+
+
+# ── Watchlist helpers ─────────────────────────────────────────────────────────
+
+def create_watchlist(name: str) -> int:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO watchlist (name, created_at) VALUES (?, ?)",
+            (name.strip(), datetime.now().isoformat()),
+        )
+        return cur.lastrowid
+
+
+def get_watchlists() -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT w.id, w.name, w.created_at,
+                   COUNT(ws.id) AS count
+            FROM watchlist w
+            LEFT JOIN watchlist_stocks ws ON ws.watchlist_id = w.id
+            GROUP BY w.id
+            ORDER BY w.created_at DESC
+        """).fetchall()
+    return [dict(r) for r in rows]
+
+
+def add_to_watchlist(watchlist_id: int, symbol: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO watchlist_stocks (watchlist_id, symbol, added_at) VALUES (?, ?, ?)",
+            (watchlist_id, symbol, datetime.now().isoformat()),
+        )
+
+
+def remove_from_watchlist(watchlist_id: int, symbol: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "DELETE FROM watchlist_stocks WHERE watchlist_id = ? AND symbol = ?",
+            (watchlist_id, symbol),
+        )
+
+
+def get_watchlist_stocks(watchlist_id: int) -> list[str]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT symbol FROM watchlist_stocks WHERE watchlist_id = ? ORDER BY added_at",
+            (watchlist_id,),
+        ).fetchall()
+    return [r["symbol"] for r in rows]
+
+
+def delete_watchlist(watchlist_id: int) -> None:
+    with get_conn() as conn:
+        conn.execute("DELETE FROM watchlist_stocks WHERE watchlist_id = ?", (watchlist_id,))
+        conn.execute("DELETE FROM watchlist WHERE id = ?", (watchlist_id,))
+
+
+def save_filter_as_watchlist(name: str, symbols: list[str]) -> int:
+    wl_id = create_watchlist(name)
+    with get_conn() as conn:
+        conn.executemany(
+            "INSERT OR IGNORE INTO watchlist_stocks (watchlist_id, symbol, added_at) VALUES (?, ?, ?)",
+            [(wl_id, sym, datetime.now().isoformat()) for sym in symbols],
+        )
+    return wl_id
