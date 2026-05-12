@@ -58,6 +58,11 @@ def parse_nl_filter(query: str) -> dict:
     # Strip markdown code fences if present
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
+    # Extract the outermost JSON object — Claude sometimes appends explanation text
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1:
+        text = text[start : end + 1]
     return json.loads(text)
 
 
