@@ -37,6 +37,7 @@ class PipelineResult:
     summary: str
     caveat: str
     valid: bool
+    filter_id: int = 0
 
 
 # ── Column metadata ───────────────────────────────────────────────────────────
@@ -161,6 +162,31 @@ If a query genuinely cannot be answered with available data (e.g., broker recomm
 news sentiment), set can_filter=false and explain in cannot_answer_reason."""
 
 
+def _build_analyst_system(query: str) -> str:
+    """Build Agent 1 system prompt enriched with past zero-result queries and user corrections."""
+    from src.database import get_zero_result_queries, get_user_corrections
+
+    system = _ANALYST_SYSTEM
+
+    zero_qs = get_zero_result_queries(limit=15)
+    if zero_qs:
+        block = "\n".join(f"  - {q}" for q in zero_qs[:10])
+        system += (
+            "\n\nPAST QUERIES THAT RETURNED 0 RESULTS — if the current query is similar, "
+            "consider broadening the criteria or flagging data coverage gaps:\n" + block
+        )
+
+    corrections = get_user_corrections(limit=8)
+    if corrections:
+        block = "\n".join(f"  - Query: \"{c['query']}\" → User said: \"{c['correction']}\"" for c in corrections)
+        system += (
+            "\n\nUSER CORRECTIONS FROM PREVIOUS RUNS — treat these as ground-truth hints "
+            "about how to interpret similar queries:\n" + block
+        )
+
+    return system
+
+
 def agent1_query_analyst(query: str, df: pd.DataFrame) -> dict:
     client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
 
@@ -188,11 +214,13 @@ def agent1_query_analyst(query: str, df: pd.DataFrame) -> dict:
 
     messages: list[dict] = [{"role": "user", "content": query}]
 
+    system = _build_analyst_system(query)
+
     while True:
         response = client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=1024,
-            system=_ANALYST_SYSTEM,
+            system=system,
             tools=tools,
             messages=messages,
         )
@@ -304,6 +332,8 @@ def agent2_data_enricher(
 # ── Agent 3: Filter Builder ───────────────────────────────────────────────────
 
 def _build_filter_prompt(df: pd.DataFrame, coverage_report: dict) -> str:
+    from src.database import get_feedback_examples, get_successful_filter_examples
+
     total = len(df)
     lines = [
         "You are a stock screening assistant. Convert the user's query into a JSON filter spec.",
@@ -325,7 +355,28 @@ def _build_filter_prompt(df: pd.DataFrame, coverage_report: dict) -> str:
         "",
         "Indian number system: 1 lakh=100 crores, 1 crore=1 (market_cap_cr is already in crores).",
         "large-cap: market_cap_cr > 20000 | mid-cap: 5000-20000 | small-cap: < 5000",
-        "",
+    ]
+
+    # Few-shot examples: user-approved first, then any successful filter
+    examples: list[dict] = []
+    seen: set[str] = set()
+    for ex in get_feedback_examples(limit=3) + get_successful_filter_examples(limit=4):
+        if ex["query"] not in seen:
+            seen.add(ex["query"])
+            examples.append(ex)
+        if len(examples) >= 4:
+            break
+
+    if examples:
+        lines.append("\nEXAMPLES FROM PAST SUCCESSFUL FILTERS (use these as style reference):")
+        for ex in examples:
+            compact = json.dumps(ex["filter"], separators=(",", ":"))
+            lines.append(f'  Query: "{ex["query"]}"')
+            lines.append(f'  Spec:  {compact}')
+            lines.append(f'  Found: {ex["result_count"]} stocks')
+            lines.append("")
+
+    lines += [
         "Return ONLY valid JSON, no markdown:",
         '{"filters":[{"column":"col","operator":"gt|lt|gte|lte|eq|contains","value":N,"description":"..."}],'
         '"sort_by":"col","sort_ascending":true,"summary":"one sentence"}',
@@ -451,6 +502,7 @@ def _fallback_single_agent(
     steps: list[AgentStep],
 ) -> PipelineResult:
     from src.nl_filter import run_nl_filter
+    from src.database import save_filter
 
     step = AgentStep(
         agent_name="Fallback (single-agent)",
@@ -461,6 +513,8 @@ def _fallback_single_agent(
 
     try:
         filtered_df, filter_spec = run_nl_filter(query, df)
+        symbols = filtered_df["symbol"].tolist() if not filtered_df.empty else []
+        filter_id = save_filter(query, filter_spec, symbols)
         return PipelineResult(
             filtered_df=filtered_df,
             filter_spec=filter_spec,
@@ -468,6 +522,7 @@ def _fallback_single_agent(
             summary=filter_spec.get("summary", query),
             caveat="",
             valid=True,
+            filter_id=filter_id,
         )
     except Exception as e:
         return PipelineResult(
@@ -477,6 +532,7 @@ def _fallback_single_agent(
             summary=f"Filter failed: {e}",
             caveat="",
             valid=False,
+            filter_id=0,
         )
 
 
@@ -591,7 +647,7 @@ def run_agent_filter(query: str, df: pd.DataFrame) -> PipelineResult:
 
     # ── Persist ───────────────────────────────────────────────────────────────
     symbols = filtered_df["symbol"].tolist() if not filtered_df.empty else []
-    save_filter(query, filter_spec, symbols)
+    filter_id = save_filter(query, filter_spec, symbols)
 
     return PipelineResult(
         filtered_df=filtered_df,
@@ -600,4 +656,5 @@ def run_agent_filter(query: str, df: pd.DataFrame) -> PipelineResult:
         summary=validation.get("summary", filter_spec.get("summary", "")),
         caveat=validation.get("caveat", ""),
         valid=validation.get("valid", True),
+        filter_id=filter_id,
     )

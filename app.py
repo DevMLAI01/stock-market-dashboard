@@ -20,6 +20,7 @@ from src.database import (
     remove_from_watchlist, get_watchlist_stocks,
     delete_watchlist, save_filter_as_watchlist,
     get_all_fundamentals, get_fundamentals_count,
+    save_filter_feedback,
 )
 from src.nse_client import get_stocks_near_52wk_high, get_nifty_universe, get_historical_ohlc
 from src.screener_client import get_stock_data
@@ -125,6 +126,10 @@ if "agent_steps" not in st.session_state:
     st.session_state.agent_steps = []
 if "filter_caveat" not in st.session_state:
     st.session_state.filter_caveat = ""
+if "last_filter_id" not in st.session_state:
+    st.session_state.last_filter_id = None
+if "show_correction_form" not in st.session_state:
+    st.session_state.show_correction_form = False
 
 
 # ── Fundamentals background refresh ──────────────────────────────────────────
@@ -389,6 +394,8 @@ with tab_screener:
             st.session_state.stock_df = pd.DataFrame()
             st.session_state.agent_steps = []
             st.session_state.filter_caveat = ""
+            st.session_state.last_filter_id = None
+            st.session_state.show_correction_form = False
             st.rerun()
 
         if run_filter and nl_query.strip():
@@ -404,6 +411,8 @@ with tab_screener:
                         st.session_state.filter_summary = result.summary
                         st.session_state.agent_steps = result.steps
                         st.session_state.filter_caveat = result.caveat
+                        st.session_state.last_filter_id = result.filter_id
+                        st.session_state.show_correction_form = False
                         st.rerun()
                     except Exception as e:
                         st.error(f"Filter error: {e}")
@@ -462,6 +471,43 @@ with tab_screener:
         # Caveat warning from Validator
         if st.session_state.filter_active and st.session_state.get("filter_caveat"):
             st.warning(st.session_state.filter_caveat)
+
+        # Feedback loop — thumbs up/down to improve future filters
+        if st.session_state.filter_active and st.session_state.get("last_filter_id"):
+            st.markdown(
+                '<div style="color:#8b9dc3;font-size:11px;margin:4px 0 2px 0">Was this result useful?</div>',
+                unsafe_allow_html=True,
+            )
+            fb_good, fb_bad = st.columns(2)
+            with fb_good:
+                if st.button("👍 Useful", key="fb_good", use_container_width=True):
+                    save_filter_feedback(st.session_state.last_filter_id, 1)
+                    st.session_state.last_filter_id = None
+                    st.session_state.show_correction_form = False
+                    st.toast("Thanks! Agents will prioritise this pattern.")
+                    st.rerun()
+            with fb_bad:
+                if st.button("👎 Off target", key="fb_bad", use_container_width=True):
+                    st.session_state.show_correction_form = True
+                    st.rerun()
+
+        if st.session_state.get("show_correction_form") and st.session_state.get("last_filter_id"):
+            correction = st.text_area(
+                "What should the filter have done differently?",
+                key="correction_text",
+                placeholder="e.g. 'FII > 20 means FII holding %, not absolute value'",
+                height=60,
+                label_visibility="visible",
+            )
+            if st.button("Submit correction", key="fb_submit", type="primary"):
+                save_filter_feedback(
+                    st.session_state.last_filter_id, -1,
+                    st.session_state.get("correction_text", ""),
+                )
+                st.session_state.last_filter_id = None
+                st.session_state.show_correction_form = False
+                st.toast("Correction saved — agents will learn from this.")
+                st.rerun()
 
         # Save filtered result as watchlist
         if st.session_state.filter_active and not st.session_state.stock_df.empty:

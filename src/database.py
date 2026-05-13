@@ -22,7 +22,17 @@ def init_db() -> None:
                 query_text TEXT NOT NULL,
                 filter_json TEXT,
                 result_symbols TEXT,
+                result_count INTEGER,
                 run_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS filter_feedback (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                filter_id INTEGER NOT NULL,
+                rating INTEGER NOT NULL,
+                correction TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (filter_id) REFERENCES filter_history(id)
             );
 
             CREATE TABLE IF NOT EXISTS screener_cache (
@@ -68,6 +78,14 @@ def init_db() -> None:
             );
         """)
         _migrate_fundamentals(conn)
+        _migrate_filter_history(conn)
+
+
+def _migrate_filter_history(conn: sqlite3.Connection) -> None:
+    try:
+        conn.execute("ALTER TABLE filter_history ADD COLUMN result_count INTEGER")
+    except sqlite3.OperationalError:
+        pass
 
 
 _NEW_FUNDAMENTALS_COLUMNS = [
@@ -95,12 +113,14 @@ def _migrate_fundamentals(conn: sqlite3.Connection) -> None:
             pass
 
 
-def save_filter(query_text: str, filter_json: dict, result_symbols: list[str]) -> None:
+def save_filter(query_text: str, filter_json: dict, result_symbols: list[str]) -> int:
+    """Save a filter run and return the inserted row ID."""
     with get_conn() as conn:
-        conn.execute(
-            "INSERT INTO filter_history (query_text, filter_json, result_symbols, run_at) VALUES (?, ?, ?, ?)",
-            (query_text, json.dumps(filter_json), json.dumps(result_symbols), datetime.now().isoformat()),
+        cur = conn.execute(
+            "INSERT INTO filter_history (query_text, filter_json, result_symbols, result_count, run_at) VALUES (?, ?, ?, ?, ?)",
+            (query_text, json.dumps(filter_json), json.dumps(result_symbols), len(result_symbols), datetime.now().isoformat()),
         )
+        return cur.lastrowid
 
 
 def get_filter_history(limit: int = 20) -> list[dict]:
@@ -109,6 +129,84 @@ def get_filter_history(limit: int = 20) -> list[dict]:
             "SELECT * FROM filter_history ORDER BY run_at DESC LIMIT ?", (limit,)
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def get_successful_filter_examples(limit: int = 5) -> list[dict]:
+    """Return recent queries that returned results, for Agent 3 few-shot prompting."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT query_text, filter_json, result_count
+               FROM filter_history
+               WHERE result_count > 0 AND filter_json IS NOT NULL
+               ORDER BY run_at DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+    examples = []
+    for r in rows:
+        try:
+            fj = json.loads(r["filter_json"] or "{}")
+            if fj.get("filters"):
+                examples.append({"query": r["query_text"], "filter": fj, "result_count": r["result_count"]})
+        except Exception:
+            pass
+    return examples
+
+
+def get_zero_result_queries(limit: int = 20) -> list[str]:
+    """Return recent queries that returned 0 results, for Agent 1 awareness."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT query_text FROM filter_history
+               WHERE result_count = 0
+               ORDER BY run_at DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+    return [r["query_text"] for r in rows]
+
+
+def save_filter_feedback(filter_id: int, rating: int, correction: str = "") -> None:
+    """Persist user feedback: rating=1 (good) or -1 (bad), with optional correction text."""
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO filter_feedback (filter_id, rating, correction, created_at) VALUES (?, ?, ?, ?)",
+            (filter_id, rating, correction, datetime.now().isoformat()),
+        )
+
+
+def get_feedback_examples(limit: int = 5) -> list[dict]:
+    """Return positively-rated filter examples (thumbs-up) for few-shot prompting."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT fh.query_text, fh.filter_json, fh.result_count
+               FROM filter_feedback ff
+               JOIN filter_history fh ON fh.id = ff.filter_id
+               WHERE ff.rating = 1 AND fh.filter_json IS NOT NULL AND fh.result_count > 0
+               ORDER BY ff.created_at DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+    examples = []
+    for r in rows:
+        try:
+            fj = json.loads(r["filter_json"] or "{}")
+            if fj.get("filters"):
+                examples.append({"query": r["query_text"], "filter": fj, "result_count": r["result_count"]})
+        except Exception:
+            pass
+    return examples
+
+
+def get_user_corrections(limit: int = 10) -> list[dict]:
+    """Return past thumbs-down entries that include a correction, for Agent 1 awareness."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT fh.query_text, ff.correction
+               FROM filter_feedback ff
+               JOIN filter_history fh ON fh.id = ff.filter_id
+               WHERE ff.rating = -1 AND ff.correction IS NOT NULL AND ff.correction != ''
+               ORDER BY ff.created_at DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+    return [{"query": r["query_text"], "correction": r["correction"]} for r in rows]
 
 
 def get_cached_screener(symbol: str, ttl_hours: int = 24) -> dict | None:
