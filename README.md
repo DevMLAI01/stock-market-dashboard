@@ -2,7 +2,7 @@
 
 # 📈 Stock Market Dashboard
 
-### AI-Powered Indian Stock Screener — Multi-Agent NL Filters, Watchlists, Live Charts & Screener.in Fundamentals
+### AI-Powered Indian Stock Screener — Self-Learning Multi-Agent NL Filters, Watchlists, Live Charts & Screener.in Fundamentals
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue?logo=python)](https://python.org)
 [![Streamlit](https://img.shields.io/badge/Streamlit-1.35+-red?logo=streamlit)](https://streamlit.io)
@@ -14,9 +14,9 @@
 
 <div align="center">
 
-| 📊 Universe | 🎯 Near 52W High | ⚡ NL Filter | ⭐ Watchlists | 💰 Running Cost |
-|:---:|:---:|:---:|:---:|:---:|
-| **~404 NSE stocks** | **auto-filtered** | **4-Agent Pipeline** | **multi-list** | **~$2–5 / month** |
+| 📊 Universe | 🎯 Near 52W High | ⚡ NL Filter | ⭐ Watchlists | 🧠 Learning | 💰 Running Cost |
+|:---:|:---:|:---:|:---:|:---:|:---:|
+| **~404 NSE stocks** | **auto-filtered** | **4-Agent Pipeline** | **multi-list** | **self-improving** | **~$2–5 / month** |
 
 </div>
 
@@ -49,6 +49,7 @@ Researching Indian stocks typically means juggling three or four tabs:
 - **Stock search** — real-time filter by symbol or company name
 - **Agent reasoning expander** — see what each agent decided, with per-column coverage stats
 - **Coverage indicator + 🔄 button** — shows how many stocks have fundamental data; manually trigger a full background fetch
+- **👍 / 👎 feedback buttons** — rate every filter result; corrections are persisted and used to improve future queries
 - **Save as Watchlist** — save any filtered result to a named watchlist
 
 ### ⭐ Watchlists Tab
@@ -107,36 +108,56 @@ Researching Indian stocks typically means juggling three or four tabs:
 Every natural language query runs through a **4-agent pipeline**, each agent specialised for its task:
 
 ```
-User Query
-    │
-    ▼
-Agent 1 — Query Analyst  (Claude Sonnet 4.6 + tool use)
-    Uses get_column_info() tool to inspect live column coverage.
-    Returns: {can_filter, required_columns, needs_enrichment, reasoning}
-    │
-    ▼
-Agent 2 — Data Enricher  (pure Python, no LLM)
-    If shareholding/extended columns are needed, re-syncs from screener_cache.
-    Returns: (enriched_df, coverage_report with per-column warnings)
-    │
-    ▼
-Agent 3 — Filter Builder  (Claude Haiku 4.5)
-    Receives confirmed columns + coverage. Builds dynamic system prompt.
-    Returns: (filtered_df, filter_spec JSON)
-    │
-    ▼
-Agent 4 — Validator  (Claude Haiku 4.5)
-    Checks result count + sample rows + coverage warnings.
-    Returns: {summary, caveat, confidence: high|medium|low}
-    │
-    ▼
-Result  →  Streamlit session state + filter_history SQLite
+SQLite learning store
+  ┌─────────────────────────────────────────────┐
+  │ filter_history  (past queries + results)     │
+  │ filter_feedback (👍 ratings + corrections)   │
+  └──────┬──────────────────────────┬───────────┘
+         │  zero-result history     │  few-shot examples
+         │  user corrections        │  thumbs-up specs
+         ▼                          ▼
+User Query ──► Agent 1 — Query Analyst  (Claude Sonnet 4.6 + tool use)
+                   Uses get_column_info() tool to inspect live column coverage.
+                   Informed by: past zero-result queries + user corrections.
+                   Returns: {can_filter, required_columns, needs_enrichment, reasoning}
+                   │
+                   ▼
+               Agent 2 — Data Enricher  (pure Python, no LLM)
+                   If shareholding/extended columns needed, re-syncs from screener_cache.
+                   Returns: (enriched_df, coverage_report with per-column warnings)
+                   │
+                   ▼
+               Agent 3 — Filter Builder  (Claude Haiku 4.5)
+                   Receives confirmed columns + coverage + few-shot examples from history.
+                   Returns: (filtered_df, filter_spec JSON)
+                   │
+                   ▼
+               Agent 4 — Validator  (Claude Haiku 4.5)
+                   Checks result count + sample rows + coverage warnings.
+                   Returns: {summary, caveat, confidence: high|medium|low}
+                   │
+                   ▼
+               Result  →  Streamlit UI
+                   │              │
+                   │   👍 Useful  │  👎 Off target + correction text
+                   └──────────────┴──────► filter_feedback SQLite
+                                                (feeds next run)
 ```
 
 **Model assignment rationale:**
-- **Agent 1 uses Sonnet 4.6** — this is the reasoning bottleneck: it must understand ambiguous financial queries, map them to columns, and detect unanswerable questions. Sonnet's stronger instruction-following and tool-use accuracy justify the cost.
+- **Agent 1 uses Sonnet 4.6** — this is the reasoning bottleneck: it must understand ambiguous financial queries, map them to columns, detect unanswerable questions, and apply prior corrections. Sonnet's stronger instruction-following and tool-use accuracy justify the cost.
 - **Agents 3 & 4 use Haiku 4.5** — structured JSON generation and sanity-checking with fully-specified prompts. Haiku handles these fast and cheap.
 - **Agent 2 is pure Python** — no model needed; it's data plumbing (SQLite reads + DataFrame merges).
+
+### How the System Learns Over Time
+
+The pipeline gets smarter with every run — no model fine-tuning required:
+
+| Signal | How it's captured | Where it's used |
+|---|---|---|
+| **Zero-result queries** | `result_count=0` stored in `filter_history` | Agent 1 sees past failed queries and broadens criteria for similar inputs |
+| **Thumbs-up (👍)** | `filter_feedback.rating = 1` | Agent 3 receives the approved filter spec as a few-shot example |
+| **Thumbs-down + correction (👎)** | `filter_feedback.rating = -1, correction = "..."` | Agent 1 receives the correction as a ground-truth hint for future similar queries |
 
 ### Filterable Columns
 
@@ -161,7 +182,7 @@ Coverage builds automatically: every stock click fetches and caches its Screener
 | `"promoter holding above 60%"` | `promoter_pct gt 60` |
 | `"show me the biggest losers today"` | Sort by `pct_change` ascending |
 
-Every query is saved to `filter_history` with its result symbols and timestamp.
+Every query is saved to `filter_history` with its result symbols, count, and timestamp. Rating it 👍 makes the spec a few-shot example for Agent 3; rating it 👎 with a correction teaches Agent 1 to avoid the same mistake.
 
 ---
 
@@ -189,7 +210,8 @@ flowchart TD
     end
 
     subgraph CACHE ["💾 SQLite — stocks.db"]
-        FH[filter_history\nquery · results · timestamp]
+        FH[filter_history\nquery · results · result_count · timestamp]
+        FF[filter_feedback\nrating · correction text]
         SC2[screener_cache\n24h TTL per symbol]
         NC[nse_cache\n15min TTL full universe]
         WL[watchlist + watchlist_stocks]
@@ -201,6 +223,7 @@ flowchart TD
     AF -->|Sonnet + Haiku API calls| CL
     FC2 -->|reads screener_cache\nno extra HTTP| SC2
     DB <--> FH
+    DB <--> FF
     DB <--> SC2
     DB <--> NC
     DB <--> WL
@@ -215,7 +238,7 @@ flowchart TD
 
 1. **On startup** — `nse_client.py` bulk-downloads 1Y daily OHLC for all symbols via yfinance, fetches market cap in parallel (30 workers), and caches the universe in SQLite for 15 minutes. Simultaneously, `fundamentals_cache.py` re-syncs all existing `screener_cache` entries into the `fundamentals` table (instant, no HTTP), then starts a background daemon to fetch the remaining stocks from Screener.in at 0.5s/stock (~3 min for the full universe).
 2. **Default view** — stocks where `pct_from_high ≤ 5%` sorted nearest-to-high first (typically 40–80 stocks).
-3. **NL filter** — query enters the 4-agent pipeline. Agent 1 inspects live column coverage via tool use. Agent 2 re-syncs extended metrics from cache if needed. Agent 3 generates a JSON filter spec from confirmed columns. Agent 4 validates results and surfaces coverage caveats. The enriched DataFrame is a LEFT JOIN of the NSE universe and the `fundamentals` table — NaN for uncached stocks means fundamental filters naturally exclude them.
+3. **NL filter** — query enters the 4-agent pipeline. Agent 1 inspects live column coverage via tool use and is pre-loaded with past zero-result queries and user corrections from `filter_feedback`. Agent 2 re-syncs extended metrics from cache if needed. Agent 3 generates a JSON filter spec using few-shot examples of previously approved filters. Agent 4 validates results and surfaces coverage caveats. The result is saved to `filter_history`; the user can rate it 👍/👎 — feedback flows back into the learning store for all future runs. The enriched DataFrame is a LEFT JOIN of the NSE universe and the `fundamentals` table — NaN for uncached stocks means fundamental filters naturally exclude them.
 4. **Stock click** — `screener_client.py` fetches `screener.in/company/{SYMBOL}/consolidated/`, parses all HTML sections, caches for 24 hours. The cached data is immediately extracted into the `fundamentals` table so it becomes available for future NL filters.
 5. **Chart** — `yfinance.Ticker.history()` with selected period/interval, rendered as a dark-themed Plotly candlestick with volume subplot and 52W high/low reference lines.
 6. **Watchlists** — stored in SQLite (`watchlist` + `watchlist_stocks` tables); live prices fetched from the cached universe on view.
@@ -232,6 +255,7 @@ flowchart TD
 | Write Python scripts to filter by ratios | Type in plain English — 4-agent Claude pipeline handles it |
 | Lose filter history between sessions | All queries + results persisted in SQLite |
 | No way to track stocks of interest | Named watchlists — add manually or save a filter |
+| AI makes the same mistake repeatedly | 👍/👎 feedback teaches agents — corrections persist across sessions |
 
 ### Key Metrics
 
@@ -335,7 +359,8 @@ stock-market-dashboard/
 │   │                           # parallel market cap fetch, get_historical_ohlc()
 │   ├── screener_client.py      # Screener.in HTML scraper — ratios, quarterly, P&L,
 │   │                           # balance sheet, cash flow, shareholding, peers
-│   ├── database.py             # SQLite: filter_history, screener_cache, nse_cache,
+│   ├── database.py             # SQLite: filter_history (+ result_count), filter_feedback
+│   │                           # (ratings + corrections), screener_cache, nse_cache,
 │   │                           # watchlist, watchlist_stocks, fundamentals (22 columns)
 │   ├── nl_filter.py            # Single-agent fallback filter (Claude Haiku)
 │   ├── agent_filter.py         # 4-agent NL pipeline: Analyst → Enricher → Builder → Validator
@@ -356,6 +381,7 @@ stock-market-dashboard/
 - [x] **Full universe background fetch** — all ~404 stocks pre-fetched at startup
 - [x] **Watchlists** — create, manage, and save filtered results as watchlists
 - [x] **Filter history tab** — replay any past query or save its results as a watchlist
+- [x] **Self-learning loop** — 👍/👎 feedback persisted in SQLite; zero-result history and user corrections injected into Agent 1; approved filter specs used as few-shot examples for Agent 3
 - [ ] **Price alerts** — notify when a stock crosses its 52W high
 - [ ] **Export** — download filtered list or watchlist as CSV with key ratios
 - [ ] **Compare mode** — overlay two stocks on the same chart
