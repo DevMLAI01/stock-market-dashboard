@@ -68,8 +68,8 @@ def extract_metrics(screener_data: dict) -> dict:
         latest_h = q_headers[-1]
         yoy_h = q_headers[-5]  # same quarter, previous year
 
-        profit_row = _get_sh_row(q_rows, "Net Profit", "Profit after tax", "Net profit", "PAT")
-        revenue_row = _get_sh_row(q_rows, "Sales", "Revenue", "Net Sales", "Revenue from operations")
+        profit_row = _get_sh_row(q_rows, "Net Profit+", "Net Profit", "Profit after tax", "Net profit", "PAT")
+        revenue_row = _get_sh_row(q_rows, "Sales+", "Sales", "Revenue", "Net Sales", "Revenue from operations")
         opm_q_row = q_rows.get("OPM %")
 
         if profit_row:
@@ -198,7 +198,7 @@ def refresh_fundamentals(symbols: list[str], delay: float = 0.4) -> int:
             _running = False
 
 
-def start_background_refresh(symbols: list[str], delay: float = 0.4) -> None:
+def start_background_refresh(symbols: list[str], delay: float = 0.5) -> None:
     """Fire a daemon thread to fetch fundamentals for the given symbols."""
     global _running
     with _lock:
@@ -210,3 +210,32 @@ def start_background_refresh(symbols: list[str], delay: float = 0.4) -> None:
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
+
+
+def start_full_universe_refresh(delay: float = 0.5) -> bool:
+    """
+    Trigger background fetch for every symbol in NSE_UNIVERSE.
+    Returns False if a refresh is already running.
+    """
+    global _running
+    with _lock:
+        if _running:
+            return False
+
+    from src.nse_client import NSE_UNIVERSE
+    # Shuffle so different stocks get priority each run
+    import random
+    symbols = list(NSE_UNIVERSE.keys())
+    random.shuffle(symbols)
+
+    def _run():
+        refresh_fundamentals(symbols, delay=delay)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    return True
+
+
+def is_refresh_running() -> bool:
+    with _lock:
+        return _running

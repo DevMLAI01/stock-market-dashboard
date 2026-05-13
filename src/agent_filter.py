@@ -190,7 +190,7 @@ def agent1_query_analyst(query: str, df: pd.DataFrame) -> dict:
 
     while True:
         response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model="claude-sonnet-4-6",
             max_tokens=1024,
             system=_ANALYST_SYSTEM,
             tools=tools,
@@ -210,7 +210,20 @@ def agent1_query_analyst(query: str, df: pd.DataFrame) -> dict:
             continue
 
         text = next((b.text for b in response.content if hasattr(b, "text")), "{}")
-        return _parse_json_safe(text)
+        result = _parse_json_safe(text)
+        # If Claude returned prose instead of JSON, treat as unanswerable
+        if "can_filter" not in result:
+            result = {
+                "can_filter": False,
+                "required_columns": [],
+                "needs_enrichment": False,
+                "enrichment_columns": [],
+                "column_domain": "unknown",
+                "reasoning": text[:300] if text else "Could not parse query intent.",
+                "filter_hints": "",
+                "cannot_answer_reason": "This query does not appear to be a stock filter request.",
+            }
+        return result
 
 
 # ── Agent 2: Data Enricher (pure Python) ─────────────────────────────────────

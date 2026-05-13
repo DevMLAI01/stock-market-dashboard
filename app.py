@@ -129,16 +129,10 @@ if "filter_caveat" not in st.session_state:
 
 # ── Fundamentals background refresh ──────────────────────────────────────────
 def _start_fundamentals_refresh() -> None:
-    """On first load: extract from screener_cache (instant), then fetch displayed stocks."""
-    from src.fundamentals_cache import sync_from_screener_cache, start_background_refresh
+    """On first load: extract from screener_cache (instant), then start full universe fetch."""
+    from src.fundamentals_cache import sync_from_screener_cache, start_full_universe_refresh
     sync_from_screener_cache()
-    try:
-        from src.nse_client import get_stocks_near_52wk_high
-        near_high = get_stocks_near_52wk_high(threshold_pct=5.0)
-        if not near_high.empty:
-            start_background_refresh(near_high["symbol"].tolist(), delay=0.4)
-    except Exception:
-        pass
+    start_full_universe_refresh(delay=0.5)
 
 
 if not st.session_state.fundamentals_refresh_started:
@@ -414,12 +408,27 @@ with tab_screener:
                     except Exception as e:
                         st.error(f"Filter error: {e}")
 
-        # Fundamentals coverage
+        # Fundamentals coverage + manual fetch-all trigger
         n_fund = get_fundamentals_count()
-        if n_fund > 0:
-            st.caption(f"🧠 Fundamentals cached: {n_fund} / 426 stocks — fundamental filters active")
-        else:
-            st.caption("🧠 Fundamentals loading in background…")
+        from src.fundamentals_cache import is_refresh_running
+        refreshing = is_refresh_running()
+        fund_col1, fund_col2 = st.columns([3, 1])
+        with fund_col1:
+            if refreshing:
+                st.caption(f"⏳ Fetching fundamentals… {n_fund} / 426 cached")
+            elif n_fund > 0:
+                st.caption(f"🧠 {n_fund} / 426 stocks cached — fundamental filters active")
+            else:
+                st.caption("🧠 Fundamentals not yet cached")
+        with fund_col2:
+            if not refreshing:
+                if st.button("🔄", help="Fetch fundamentals for all 426 stocks", use_container_width=True):
+                    from src.fundamentals_cache import start_full_universe_refresh
+                    started = start_full_universe_refresh(delay=0.5)
+                    if started:
+                        st.toast("Background fetch started for all stocks (~3 min)")
+                    else:
+                        st.toast("Refresh already running")
 
         # Agent reasoning expander (visible after a filter run)
         if st.session_state.filter_active and st.session_state.get("agent_steps"):
