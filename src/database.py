@@ -67,6 +67,32 @@ def init_db() -> None:
                 fetched_at TEXT NOT NULL
             );
         """)
+        _migrate_fundamentals(conn)
+
+
+_NEW_FUNDAMENTALS_COLUMNS = [
+    ("promoter_pct", "REAL"),
+    ("fii_pct", "REAL"),
+    ("dii_pct", "REAL"),
+    ("public_pct", "REAL"),
+    ("pledged_pct", "REAL"),
+    ("opm_pct", "REAL"),
+    ("opm_quarterly_pct", "REAL"),
+    ("net_profit_margin", "REAL"),
+    ("sales_growth_3yr", "REAL"),
+    ("price_to_book", "REAL"),
+    ("eps_growth_3yr", "REAL"),
+    ("free_cash_flow", "REAL"),
+    ("shareholding_quarter", "TEXT"),
+]
+
+
+def _migrate_fundamentals(conn: sqlite3.Connection) -> None:
+    for col_name, col_type in _NEW_FUNDAMENTALS_COLUMNS:
+        try:
+            conn.execute(f"ALTER TABLE fundamentals ADD COLUMN {col_name} {col_type}")
+        except sqlite3.OperationalError:
+            pass
 
 
 def save_filter(query_text: str, filter_json: dict, result_symbols: list[str]) -> None:
@@ -197,8 +223,12 @@ def upsert_fundamentals(symbol: str, metrics: dict) -> None:
         conn.execute("""
             INSERT OR REPLACE INTO fundamentals
                 (symbol, pe_ratio, roce, roe, book_value, debt_equity, dividend_yield,
-                 profit_growth_yoy, revenue_growth_yoy, sales_growth_5yr, latest_quarter, fetched_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 profit_growth_yoy, revenue_growth_yoy, sales_growth_5yr, latest_quarter,
+                 promoter_pct, fii_pct, dii_pct, public_pct, pledged_pct,
+                 opm_pct, opm_quarterly_pct, net_profit_margin, sales_growth_3yr,
+                 price_to_book, eps_growth_3yr, free_cash_flow, shareholding_quarter,
+                 fetched_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             symbol,
             metrics.get("pe_ratio"),
@@ -211,6 +241,19 @@ def upsert_fundamentals(symbol: str, metrics: dict) -> None:
             metrics.get("revenue_growth_yoy"),
             metrics.get("sales_growth_5yr"),
             metrics.get("latest_quarter"),
+            metrics.get("promoter_pct"),
+            metrics.get("fii_pct"),
+            metrics.get("dii_pct"),
+            metrics.get("public_pct"),
+            metrics.get("pledged_pct"),
+            metrics.get("opm_pct"),
+            metrics.get("opm_quarterly_pct"),
+            metrics.get("net_profit_margin"),
+            metrics.get("sales_growth_3yr"),
+            metrics.get("price_to_book"),
+            metrics.get("eps_growth_3yr"),
+            metrics.get("free_cash_flow"),
+            metrics.get("shareholding_quarter"),
             datetime.now().isoformat(),
         ))
 

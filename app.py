@@ -24,6 +24,7 @@ from src.database import (
 from src.nse_client import get_stocks_near_52wk_high, get_nifty_universe, get_historical_ohlc
 from src.screener_client import get_stock_data
 from src.nl_filter import run_nl_filter
+from src.agent_filter import run_agent_filter
 from src.charts import build_candlestick_chart
 
 # ── Page config ───────────────────────────────────────────────────────────────
@@ -120,6 +121,10 @@ if "active_watchlist_id" not in st.session_state:
     st.session_state.active_watchlist_id = None
 if "fundamentals_refresh_started" not in st.session_state:
     st.session_state.fundamentals_refresh_started = False
+if "agent_steps" not in st.session_state:
+    st.session_state.agent_steps = []
+if "filter_caveat" not in st.session_state:
+    st.session_state.filter_caveat = ""
 
 
 # ── Fundamentals background refresh ──────────────────────────────────────────
@@ -172,7 +177,7 @@ def get_enriched_universe() -> pd.DataFrame:
     fundamentals = get_all_fundamentals()
     if fundamentals.empty:
         return universe
-    fund_cols = [c for c in fundamentals.columns if c not in ("symbol", "fetched_at", "latest_quarter")]
+    fund_cols = [c for c in fundamentals.columns if c not in ("symbol", "fetched_at", "latest_quarter", "shareholding_quarter")]
     merged = universe.merge(fundamentals[["symbol"] + fund_cols], on="symbol", how="left")
     return merged
 
@@ -388,20 +393,23 @@ with tab_screener:
             st.session_state.filter_active = False
             st.session_state.filter_summary = ""
             st.session_state.stock_df = pd.DataFrame()
+            st.session_state.agent_steps = []
+            st.session_state.filter_caveat = ""
             st.rerun()
 
         if run_filter and nl_query.strip():
             if not os.environ.get("ANTHROPIC_API_KEY"):
                 st.error("Set ANTHROPIC_API_KEY in your .env file to use AI filtering.")
             else:
-                with st.spinner("Loading stock universe..."):
-                    enriched = get_enriched_universe()
-                with st.spinner("Applying AI filter..."):
+                with st.spinner("Running multi-agent filter pipeline…"):
                     try:
-                        filtered_df, spec = run_nl_filter(nl_query.strip(), enriched)
-                        st.session_state.stock_df = filtered_df
+                        enriched = get_enriched_universe()
+                        result = run_agent_filter(nl_query.strip(), enriched)
+                        st.session_state.stock_df = result.filtered_df
                         st.session_state.filter_active = True
-                        st.session_state.filter_summary = spec.get("summary", nl_query)
+                        st.session_state.filter_summary = result.summary
+                        st.session_state.agent_steps = result.steps
+                        st.session_state.filter_caveat = result.caveat
                         st.rerun()
                     except Exception as e:
                         st.error(f"Filter error: {e}")
@@ -412,6 +420,39 @@ with tab_screener:
             st.caption(f"🧠 Fundamentals cached: {n_fund} / 426 stocks — fundamental filters active")
         else:
             st.caption("🧠 Fundamentals loading in background…")
+
+        # Agent reasoning expander (visible after a filter run)
+        if st.session_state.filter_active and st.session_state.get("agent_steps"):
+            _STATUS_ICON = {"done": "✓", "warning": "⚠", "error": "✗", "running": "…"}
+            _STATUS_COLOR = {"done": "#26a69a", "warning": "#ffa500", "error": "#ef5350", "running": "#8b9dc3"}
+            with st.expander("🧠 Agent reasoning", expanded=False):
+                for step in st.session_state.agent_steps:
+                    icon = _STATUS_ICON.get(step.status, "•")
+                    color = _STATUS_COLOR.get(step.status, "#8b9dc3")
+                    st.markdown(
+                        f'<div style="border-left:3px solid {color};padding:4px 10px;margin:4px 0">'
+                        f'<b style="color:{color}">{icon} {step.agent_name}</b><br>'
+                        f'<span style="color:#c0c4cc;font-size:12px">{step.reasoning}</span>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+                    # Show per-column coverage for the Data Enricher step
+                    if step.agent_name == "Data Enricher":
+                        for col, cov in step.details.items():
+                            if col == "warnings" or not isinstance(cov, dict):
+                                continue
+                            pct = cov.get("pct", 0)
+                            bar_col = "#26a69a" if pct > 60 else ("#ffa500" if pct > 20 else "#ef5350")
+                            st.markdown(
+                                f'<div style="font-size:11px;color:#8b9dc3;margin-left:16px">'
+                                f'{col}: {cov["available"]}/{cov["total"]} stocks '
+                                f'<span style="color:{bar_col}">({pct}%)</span></div>',
+                                unsafe_allow_html=True,
+                            )
+
+        # Caveat warning from Validator
+        if st.session_state.filter_active and st.session_state.get("filter_caveat"):
+            st.warning(st.session_state.filter_caveat)
 
         # Save filtered result as watchlist
         if st.session_state.filter_active and not st.session_state.stock_df.empty:

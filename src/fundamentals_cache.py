@@ -34,6 +34,13 @@ def _to_float(text) -> float | None:
         return None
 
 
+def _get_sh_row(rows: dict, *variants: str):
+    for k in variants:
+        if k in rows:
+            return rows[k]
+    return None
+
+
 def extract_metrics(screener_data: dict) -> dict:
     """Pull filterable numeric metrics out of a screener data dict."""
     metrics: dict = {}
@@ -47,29 +54,23 @@ def extract_metrics(screener_data: dict) -> dict:
     metrics["debt_equity"] = _to_float(ratios.get("Debt to equity"))
     metrics["dividend_yield"] = _to_float(ratios.get("Dividend Yield"))
     metrics["sales_growth_5yr"] = _to_float(ratios.get("Sales growth 5Years"))
+    metrics["pledged_pct"] = _to_float(ratios.get("Pledged percentage"))
+    metrics["price_to_book"] = _to_float(ratios.get("Price to book value"))
+    metrics["eps_growth_3yr"] = _to_float(ratios.get("EPS growth 3Years"))
+    metrics["free_cash_flow"] = _to_float(ratios.get("Free Cash Flow"))
 
     # ── Quarterly YoY growth ──────────────────────────────────────────────────
     quarterly = screener_data.get("quarterly", {})
-    headers = quarterly.get("headers", [])
-    rows = quarterly.get("rows", {})
+    q_headers = quarterly.get("headers", [])
+    q_rows = quarterly.get("rows", {})
 
-    if headers and len(headers) >= 5:
-        latest_h = headers[-1]
-        yoy_h = headers[-5]  # same quarter, previous year
+    if q_headers and len(q_headers) >= 5:
+        latest_h = q_headers[-1]
+        yoy_h = q_headers[-5]  # same quarter, previous year
 
-        # Net Profit row — Screener uses different names for different companies
-        profit_row = (
-            rows.get("Net Profit")
-            or rows.get("Profit after tax")
-            or rows.get("Net profit")
-            or rows.get("PAT")
-        )
-        revenue_row = (
-            rows.get("Sales")
-            or rows.get("Revenue")
-            or rows.get("Net Sales")
-            or rows.get("Revenue from operations")
-        )
+        profit_row = _get_sh_row(q_rows, "Net Profit", "Profit after tax", "Net profit", "PAT")
+        revenue_row = _get_sh_row(q_rows, "Sales", "Revenue", "Net Sales", "Revenue from operations")
+        opm_q_row = q_rows.get("OPM %")
 
         if profit_row:
             latest_p = _to_float(profit_row.get(latest_h))
@@ -87,6 +88,59 @@ def extract_metrics(screener_data: dict) -> dict:
                 metrics["revenue_growth_yoy"] = round(
                     (latest_r - yoy_r) / abs(yoy_r) * 100, 2
                 )
+
+        if opm_q_row:
+            metrics["opm_quarterly_pct"] = _to_float(opm_q_row.get(latest_h))
+
+    # ── Annual P&L ────────────────────────────────────────────────────────────
+    annual = screener_data.get("annual_pl", {})
+    a_headers = annual.get("headers", [])
+    a_rows = annual.get("rows", {})
+
+    if a_headers:
+        latest_a = a_headers[-1]
+        opm_row = a_rows.get("OPM %")
+        if opm_row:
+            metrics["opm_pct"] = _to_float(opm_row.get(latest_a))
+
+        sales_row = _get_sh_row(a_rows, "Sales+", "Sales", "Revenue", "Net Sales")
+        np_row = _get_sh_row(a_rows, "Net Profit+", "Net Profit", "Profit after tax", "PAT")
+
+        # Net profit margin (annual)
+        if sales_row and np_row:
+            s = _to_float(sales_row.get(latest_a))
+            p = _to_float(np_row.get(latest_a))
+            if s and s != 0 and p is not None:
+                metrics["net_profit_margin"] = round(p / s * 100, 2)
+
+        # 3-year sales CAGR
+        if sales_row and len(a_headers) >= 4:
+            h_3yr = a_headers[-4]
+            s_latest = _to_float(sales_row.get(latest_a))
+            s_3yr = _to_float(sales_row.get(h_3yr))
+            if s_latest and s_3yr and s_3yr > 0:
+                metrics["sales_growth_3yr"] = round(
+                    ((s_latest / s_3yr) ** (1 / 3) - 1) * 100, 2
+                )
+
+    # ── Shareholding ──────────────────────────────────────────────────────────
+    sh = screener_data.get("shareholding", {})
+    sh_headers = sh.get("headers", [])
+    sh_rows = sh.get("rows", {})
+
+    if sh_headers:
+        latest_sh = sh_headers[-1]
+        metrics["shareholding_quarter"] = latest_sh
+
+        for col, *variants in [
+            ("promoter_pct", "Promoters+", "Promoters"),
+            ("fii_pct", "FIIs+", "FIIs"),
+            ("dii_pct", "DIIs+", "DIIs"),
+            ("public_pct", "Public+", "Public"),
+        ]:
+            row = _get_sh_row(sh_rows, *variants)
+            if row:
+                metrics[col] = _to_float(row.get(latest_sh))
 
     return metrics
 
